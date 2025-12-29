@@ -1,0 +1,142 @@
+# CUDA Ray Tracer
+
+A CUDA-accelerated, **one-bounce** ray tracer with a physically based shading model (metal/rough + extras), OBJ mesh loading, and BVH acceleration. It’s designed to be used either as a small rendering “library” (`Scene`/`Mesh`/`Camera`) or as an interactive app via the GLFW/OpenGL glue code in `RTapp_utils.cuh`.
+
+---
+
+## Features
+
+- **CUDA kernel renderer** (`render_kernel`) writing an 8-bit RGB pixel buffer
+- **CPU-built BVH, GPU traversal** (iterative stack traversal on device)
+- **OBJ loading** (triangle meshes) + simple transform controls
+- **Material system** (PBR-style):
+  - albedo, specular, metallic, roughness, emission
+  - ior + transmission (glass), clearcoat, anisotropy, sheen, subsurface knobs, iridescence
+- **Lights**: point, directional, spot (+ ambient)
+- **Sky gradient** background
+- **Tonemap + gamma** in-kernel (`color/(color+1)` then gamma 2.2)
+
+---
+
+## Repository layout (core headers)
+
+- `raytracer/RTscene.cuh`  
+  Scene container, materials/lights, device shading + intersections, CUDA render kernel, and a couple small scene/material helper namespaces.
+- `raytracer/RTmesh.cuh`  
+  Mesh container + OBJ parser, CPU BVH build, device uploads.
+- `raytracer/RTcamera.cuh`  
+  Camera ray generation (supports depth-of-field sampling with blue-noise on GPU).
+- `raytracer/RTmathutils.cuh`  
+  CUDA-friendly math helpers, constants, clamping/lerp, random helpers.
+- `raytracer/RTapp_utils.cuh`  
+  App-facing utilities: CLI parsing, camera controller, demo scene builders, and GLFW/OpenGL/CUDA glue.
+
+> Note: these headers include project-local dependencies under `common/` (e.g., `common/vec3.cuh`, `common/ray.cuh`, `common/triangle.cuh`, `common/bluenoise.cuh`, and `common/glfw_view_interop.hpp`).
+
+---
+
+## Requirements
+
+- NVIDIA GPU + **CUDA Toolkit**
+- C++ compiler compatible with your CUDA toolchain (C++17 recommended)
+- If you’re using the interactive viewer path: **GLFW** + **OpenGL loader** (GLAD is supported via `__has_include` checks in `RTapp_utils.cuh`)
+
+---
+
+## Running
+
+### CLI arguments (from `parseArguments`)
+
+- `--help`  
+- `-s, --scene <id>` (integer)
+- `-w, --width <px>`
+- `-h, --height <px>`
+- `-o, --output <name>`
+
+Demo scene selection is implemented in `buildSceneById()` (see `RTapp_utils.cuh`). Some scene IDs load OBJ assets from a `models/` folder (e.g., `models/usnm_346-01-100k.obj`, etc.).
+
+---
+
+## Camera controls (GLFW)
+
+`CameraController` (in `RTapp_utils.cuh`) uses:
+
+- **W/A/S/D**: move
+- **Space**: move up
+- **Left Ctrl**: move down
+- **Left Shift**: speed boost
+- **Mouse**: look around (yaw/pitch)
+- **C**: toggle mouse capture
+
+---
+
+## Minimal usage example (headless render to PPM)
+
+This shows the intended call flow:
+
+1) build your scene (meshes, lights, camera)  
+2) `uploadToGPU()`  
+3) `render()` into a host pixel buffer  
+4) optional `saveAsPPM()`
+
+```cpp
+#include "raytracer/RTscene.cuh"
+
+int main() {
+    const int W = 800, H = 600;
+    Scene scene(W, H);
+
+    // Geometry
+    Material floorMat(vec3(0.8f), /*roughness=*/0.9f, /*metallic=*/0.0f);
+    scene.addPlaneXZ(/*planeY=*/-1.0f, /*halfSize=*/10.0f, floorMat);
+
+    Material sphereMat(vec3(1.0f), /*roughness=*/0.05f, /*metallic=*/0.0f);
+    sphereMat.transmission = 0.98f;
+    sphereMat.ior = 1.5f;
+    scene.addSphere(/*segments=*/48, sphereMat)->moveTo(vec3(0, 0, -5));
+
+    // Lighting
+    scene.setAmbientLight(vec3(0.02f));
+    scene.addPointLight(vec3(0, 5, -2), vec3(1.0f), /*intensity=*/2.0f, /*range=*/30.0f);
+    scene.setSkyGradient(vec3(0.6f, 0.75f, 1.0f), vec3(0.95f, 0.95f, 1.0f));
+
+    // Camera
+    scene.moveCamera(vec3(0, 1.0f, 3.0f));
+    scene.lookCameraAt(vec3(0, 0.5f, -5.0f));
+
+    // Acceleration structure tuning (optional)
+    scene.setBVHLeafTarget(/*target=*/12, /*tol=*/5);
+
+    // Render
+    scene.uploadToGPU();
+    std::vector<unsigned char> pixels(scene.getPixelBufferSize());
+    scene.render(pixels.data());
+
+    // Output (ASCII PPM "P3")
+    scene.saveAsPPM("output.ppm", pixels.data());
+}
+```
+
+---
+
+## Performance notes
+
+- **BVH leaf size**: `Scene::setBVHLeafTarget(target, tol)` controls BVH leaf granularity during mesh BVH builds.
+- **Static vs dynamic scenes**:
+  - `Scene::uploadToGPU()` is ideal for mostly-static content.
+  - If you’re animating transforms/materials/lights every frame, consider `Scene::render_to_device()` which rebuilds descriptors each call (simpler correctness, more overhead), or re-call `uploadToGPU()` when needed.
+- Output is **8-bit RGB**, tonemapped and gamma-corrected in the kernel.
+
+---
+
+## Troubleshooting
+
+- **“Scene not uploaded to GPU”**: call `scene.uploadToGPU()` before `scene.render(...)`.
+- **Missing GLAD header**: `RTapp_utils.cuh` tries multiple include paths (`<glad/glad.h>` etc.). Ensure GLAD is available *somewhere* on your include path (or provided by your interop header).
+- **OBJ asset paths**: demo scenes assume a `models/` directory next to your executable or working directory.
+
+---
+
+## License
+
+Add your license text here (MIT/Apache-2.0/etc.).
